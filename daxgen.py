@@ -8,8 +8,6 @@ import csv
 from datetime import datetime
 from pathlib import Path
 
-from Pegasus.api import *
-
 logging.basicConfig(level=logging.INFO)
 
 # --- Import Pegasus API ------------------------------------------------------
@@ -96,29 +94,8 @@ class GenomeWorkflow(object):
         self.rc.write()
         self.wf.write()
 
-        if produce_dot:
-            ## Produce a dot file of the workflow one can plot with dot -Tpdf graph.dot -o graph.pdf
-            self.wf.graph(include_files=False, no_simplify=False, label="xform-id", output=self.wf_dir + '/' + self.wid + ".dot")
 
 
-    # --- Configuration (Pegasus Properties) ----------------------------------
-    def create_pegasus_properties(self):
-        self.props = Properties()     
-        
-        if self.exec_site == "cori":
-            self.props["pegasus.transfer.stagein.remote.sites"] = "cori"
-
-        if self.use_decaf:
-            self.props["pegasus.job.aggregator"] = "Decaf"
-            self.props["pegasus.data.configuration"] = "sharedfs"
-        
-        if self.use_pmc:
-            self.props["pegasus.job.aggregator"] = "mpiexec"
-            self.props["pegasus.data.configuration"] = "sharedfs"
-            
-        if self.custom_site_file:
-            print("==> Overriding site file with given site catalog: {}".format(self.custom_site_file))
-            self.props["pegasus.catalog.site.file"] = self.custom_site_file
 
     # --- Site Catalog --------------------------------------------------------
     def create_sites_catalog(self) -> None:
@@ -142,39 +119,12 @@ class GenomeWorkflow(object):
 
         self.sc.add_sites(local, condorpool)
 
-        if self.exec_site == "cori":
-            cori = (
-                Site("cori")
-                .add_grids(
-                    Grid(grid_type=Grid.BATCH, scheduler_type=Scheduler.SLURM,
-                         contact="${NERSC_USER}@cori.nersc.gov", job_type=SupportedJobs.COMPUTE),
-                    Grid(grid_type=Grid.BATCH, scheduler_type=Scheduler.SLURM,
-                         contact="${NERSC_USER}@cori.nersc.gov", job_type=SupportedJobs.AUXILLARY)
-                )
-                .add_directories(
-                    Directory(Directory.SHARED_SCRATCH, "/global/cscratch1/sd/${NERSC_USER}/pegasus/scratch")
-                        .add_file_servers(FileServer("file:///global/cscratch1/sd/${NERSC_USER}/pegasus/scratch", Operation.PUT))
-                        .add_file_servers(FileServer("scp://${NERSC_USER}@cori.nersc.gov/global/cscratch1/sd/${NERSC_USER}/pegasus/scratch", Operation.GET)),
-                    Directory(Directory.SHARED_STORAGE, "/global/cscratch1/sd/${NERSC_USER}/pegasus/storage")
-                        .add_file_servers(FileServer("scp:///global/cscratch1/sd/${NERSC_USER}/pegasus/storage", Operation.ALL))
-                )
-                .add_pegasus_profile(
-                    style="ssh",
-                    data_configuration="sharedfs",
-                    change_dir="true",
-                    project="${NERSC_PROJECT}",
-                    runtime="300"
-                    # grid_start = "NoGridStart"
-                )
-                .add_profiles(Namespace.PEGASUS, key="SSH_PRIVATE_KEY", value="${HOME}/.ssh/bosco_key.rsa")
-                .add_env(key="PEGASUS_HOME", value="${NERSC_PEGASUS_HOME}")
-            )
-            self.sc.add_sites(cori)
-
     # --- Transformation Catalog (Executables and Containers) -----------------
 
     def create_transformation_catalog(self) -> None:
         self.tc = TransformationCatalog()
+        
+        # set of tasks, individuals. Take an input of produce an output of chr{}n-{}-{}.tar.gz
 
         e_individuals = (
             Transformation(
@@ -213,131 +163,6 @@ class GenomeWorkflow(object):
             is_stageable=True,
         )
 
-        if self.exec_site == "cori":
-            # Pegasus transformations
-            pegasus_transfer = (
-                Transformation("transfer", namespace="pegasus", site="cori",
-                               pfn="$PEGASUS_HOME/bin/pegasus-transfer", is_stageable=False)
-                .add_pegasus_profile(
-                    queue="@escori",
-                    runtime="300",
-                    glite_arguments="--qos=xfer --licenses=SCRATCH"
-                )
-                .add_profiles(Namespace.PEGASUS, key="transfer.threads", value="8")
-                .add_env(key="PEGASUS_TRANSFER_THREADS", value="8")
-            )
-            pegasus_dirmanager = (
-                Transformation("dirmanager", namespace="pegasus", site="cori",
-                               pfn="$PEGASUS_HOME/bin/pegasus-transfer", is_stageable=False)
-                .add_pegasus_profile(
-                    queue="@escori",
-                    runtime="300",
-                    glite_arguments="--qos=xfer --licenses=SCRATCH"
-                )
-            )
-            pegasus_cleanup = (
-                Transformation("cleanup", namespace="pegasus", site="cori",
-                               pfn="$PEGASUS_HOME/bin/pegasus-transfer", is_stageable=False)
-                .add_pegasus_profile(
-                    queue="@escori",
-                    runtime="60",
-                    glite_arguments="--qos=xfer --licenses=SCRATCH"
-                )
-            )
-            system_chmod = (
-                Transformation("chmod", namespace="system", site="cori",
-                               pfn="/usr/bin/chmod", is_stageable=False)
-                .add_pegasus_profile(
-                    queue="@escori",
-                    runtime="120",
-                    glite_arguments="--qos=xfer --licenses=SCRATCH"
-                )
-            )
-            self.tc.add_transformations(pegasus_transfer, pegasus_dirmanager, pegasus_cleanup, system_chmod)
-            
-            # Main tasks' transformations
-            individuals_pfn = self.src_path + '/bin/individuals' + self.suffix 
-            individuals_merge_pfn = self.src_path + '/bin/individuals_merge' + self.suffix
-            sifting_pfn = self.src_path + '/bin/sifting' + self.suffix
-            mutation_overlap_pfn = self.src_path + '/bin/mutation_overlap' + self.suffix
-            freq_pfn = self.src_path + '/bin/frequency.py'
-            if self.use_decaf:
-                individuals_pfn = self.src_path + '/bin/individuals_mpi' + self.suffix
-                individuals_merge_pfn = self.src_path + '/bin/individuals_merge_mpi' + self.suffix
-                
-            e_individuals = (
-                Transformation("individuals", site="cori", pfn=individuals_pfn, is_stageable=True)
-                .add_pegasus_profile(
-                    cores="1",
-                    runtime="18000",
-                    glite_arguments="--qos=regular --constraint=haswell --licenses=SCRATCH",
-                )
-            )
-            e_individuals_merge = (
-                Transformation("individuals_merge", site="cori", pfn=individuals_merge_pfn, is_stageable=True)
-                .add_pegasus_profile(
-                    cores="1",
-                    runtime="1800",
-                    glite_arguments="--qos=regular --constraint=haswell --licenses=SCRATCH",
-                )
-            )
-            e_sifting = (
-                Transformation("sifting", site="cori", pfn=sifting_pfn, is_stageable=True)
-                .add_pegasus_profile(
-                    cores="1",
-                    runtime="1800",
-                    glite_arguments="--qos=regular --constraint=haswell --licenses=SCRATCH",
-                )
-            )
-            e_mutation_overlap = (
-                Transformation("mutation_overlap", site="cori", pfn=mutation_overlap_pfn, is_stageable=True)
-                .add_pegasus_profile(
-                    cores="1",
-                    runtime="1800",
-                    glite_arguments="--qos=regular --constraint=haswell --licenses=SCRATCH",
-                )
-            )
-            e_freq = (
-                Transformation("frequency", site="cori", pfn=freq_pfn, is_stageable=True)
-                .add_pegasus_profile(
-                    cores="1",
-                    runtime="1800",
-                    glite_arguments="--qos=regular --constraint=haswell --licenses=SCRATCH",
-                )
-            )   
-            if self.use_decaf:
-                env_script = self.src_path + '/env.sh'
-                json_fn = "1Kgenome.json"
-                n_nodes = self.ind_jobs + 1
-                decaf = (
-                    Transformation("decaf", namespace="dataflow", site="cori", pfn=json_fn, is_stageable=False)
-                    .add_pegasus_profile(
-                        runtime="18000",
-                        glite_arguments="--qos=regular --constraint=haswell --licenses=SCRATCH --nodes=" + str(n_nodes) + " --ntasks-per-node=1 --ntasks=" + str(n_nodes),
-                        # glite_arguments="--qos=debug --constraint=haswell --licenses=SCRATCH",
-                        # exitcode.successmsg="Execution time in seconds:",
-                    )
-                    .add_profiles(Namespace.PEGASUS, key="exitcode.successmsg", value="Execution time in seconds:")
-                    .add_profiles(Namespace.PEGASUS, key="dagman.post", value="pegasus-exitcode")
-                    .add_env(key="DECAF_ENV_SOURCE", value=env_script)  
-                )
-                self.tc.add_transformations(decaf)
-            if self.use_pmc:
-                pmc_wrapper_pfn = self.src_path + '/bin/pmc-wrapper'
-                n_nodes = self.ind_jobs
-                pmc = (
-                    Transformation("mpiexec", namespace="pegasus", site="cori", pfn=pmc_wrapper_pfn, is_stageable=False)
-                    .add_pegasus_profile(
-                        runtime="18000",
-                        glite_arguments="--qos=regular --constraint=haswell --licenses=SCRATCH --nodes=" + str(n_nodes) + " --ntasks-per-node=1 --ntasks=" + str(n_nodes),
-                    )
-                    .add_env(key="PEGASUS_PMC_TASKS", value=n_nodes+1)
-                    # .add_profiles(Namespace.PEGASUS, key="job.aggregator", value="mpiexec")
-                    # .add_profiles(Namespace.PEGASUS, key="nodes", value=1)
-                    # .add_profiles(Namespace.PEGASUS, key="ppn", value=32)
-                )
-                self.tc.add_transformations(pmc)
-
         self.tc.add_transformations(
             e_individuals, e_individuals_merge, e_sifting, e_mutation_overlap, e_freq)
 
@@ -345,6 +170,8 @@ class GenomeWorkflow(object):
 
     def create_replica_catalog(self) -> None:
         self.rc = ReplicaCatalog()
+
+        # declare all data files, data/20..../
 
         self.rc.add_replica(site=self.file_site, lfn=self.columns,
                             pfn=self.src_path + '/data/' + self.dataset + '/' + self.columns.lfn)
@@ -366,6 +193,7 @@ class GenomeWorkflow(object):
         
         with open(self.datafile, 'r') as f:
             for row in csv.reader(f):
+                # base file, 250k, annotations
                 base_file = row[0]
                 threshold = int(row[1])
                 # To ensure we do not create too many individuals jobs
@@ -382,21 +210,32 @@ class GenomeWorkflow(object):
                 output_files = []
 
                 # Individuals Jobs
+                # the input file for individuals is the base file 
                 f_individuals = File(base_file)
                 self.rc.add_replica(site=self.file_site, lfn=f_individuals, pfn=self.src_path +
                                     '/data/' + self.dataset + '/' + f_individuals.lfn)
 
+                # get the c number (chromosome?). Looks like it is in the filename eg ALL.chr1.250000.vcf 
                 c_num = base_file[base_file.find('chr')+3:]
                 c_num = c_num[0:c_num.find('.')]
                 c_nums.append(c_num)
 
+                # while the counter is less than num rows of data file
+                # step / threshold num jobs
                 while counter < threshold:
                     stop = counter + step
 
+                    # we create an ouput file of the format, 
                     out_name = 'chr%sn-%s-%s.tar.gz' % (c_num, counter, stop)
                     output_files.append(out_name)
+                    # f chr new output file
                     f_chrn = File(out_name)
 
+
+                    # new job with args - data_file, chr number, number of chr? number of proc?, max proc?
+                    # ./individuals ALL.chr1.xyz 1 100 200 250000 
+                    # input pegasus file objects, f_indiv, columns.txt?
+                    # output pegasus file objects chrn. some flags
                     j_individuals = (
                         Job('individuals')
                             .add_args(f_individuals, c_num, str(counter), str(stop), str(threshold))
@@ -599,22 +438,21 @@ if __name__ == "__main__":
         custom_site_file = args.sites_catalog
     )
 
+    # catalog compute resources
     print("Creating execution sites...")
     workflow.create_sites_catalog()
 
-    print("Creating workflow properties...")
-    workflow.create_pegasus_properties()
-
+    # catalog of executables to be run
     print("Creating transformation catalog...")
     workflow.create_transformation_catalog()
 
+    # input file catalog
     print("Creating replica catalog...")
     workflow.create_replica_catalog()
 
+    # create the workflow
     print("Creating pipeline workflow dag...")
     workflow.create_workflow()
-
-    workflow.write(produce_dot=False)
 
     if not args.dir_name:
         args.dir_name = workflow.wid
